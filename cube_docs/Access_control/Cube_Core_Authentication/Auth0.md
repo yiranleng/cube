@@ -1,0 +1,24 @@
+# Cube Core Authentication / Auth0
+
+## 概述
+- **本页主题**：Cube Core Authentication / Auth0
+- **目标**：说明该功能/概念能解决什么问题，适用场景是什么。
+
+## 关键约束与要求（必须列全）
+- **安全/权限**：
+- **治理/一致性**：
+- **性能/缓存**：
+- **兼容性/限制**：
+
+## 配置与接口（如果适用）
+- **关键参数/环境变量**：
+- **API/CLI/SDK**：
+
+## 常见坑与最佳实践
+- 
+
+## 与其他模块的关系
+- 
+
+## 来源
+- https://cube.dev/docs/product/introduction
