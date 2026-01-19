@@ -1,7 +1,5 @@
 # Syntax - 语法
 
-## 文章重点总结
-
 ### 目录与语法形式
 - 数据模型文件放在 **model** 目录；可用 `schema_path` 改名，或 `repository_factory` 动态指定目录与内容。
 - 建议：每个 cube 单独文件放 **model/cubes**，每个 view 放 **model/views**。
