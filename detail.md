@@ -1,0 +1,599 @@
+- **项目最佳实践文档（Data Modeling）**
+  - **唯一入口承诺**
+    - **读者/AI 只需读完本文**
+      - 不需要查看其它文件
+      - 所有概念/规则/约束/注意事项/配方都在这一棵树里
+
+  - **平台定位与语义层总则（法律级约束）**
+    - **平台定位**
+      - Cube 是“基于开源语义层的商业智能平台”，面向人类与 AI 共同使用
+      - 语义层是 AI 与人类工作的基础设施：集中定义指标、实体关系与业务逻辑
+      - 角色覆盖：数据工程师 / 数据分析师 / 业务用户（统一通过语义层交互）
+    - **语义层的基础职责**
+      - 为 AI 与人类提供统一、可信、可治理的指标与维度
+      - 防止不一致指标、分散逻辑与无治理访问导致的错误结论
+    - **四大支柱（必须同时满足）**
+      - Data Modeling：建立业务语义与知识图谱
+      - Access Control：统一安全策略与访问控制
+      - Caching：通过预聚合保障性能与成本
+      - APIs：以标准协议对外提供统一访问
+    - **Semantic SQL（语义 SQL）**
+      - 语义层作为“可信代理层”，所有查询必须经过运行时验证
+      - 语义 SQL 扩展 Postgres 兼容 SQL，并支持 MEASURE 函数
+      - 语义 SQL 的目标：在可治理前提下保留灵活计算能力
+      - 语义层运行时必须作为护栏：禁止 AI 直接查询数仓
+    - **代码优先（Code-first）强制原则**
+      - 所有配置、模型、访问策略必须以代码定义并纳入版本控制
+      - 代码优先使协作可审计、可回滚、可测试、可复用
+      - AI 协作必须依托代码流程与审查机制，禁止绕开模型直接查询仓库
+    - **数据模型的核心定义**
+      - 数据模型为 AI 提供“业务知识图谱”
+      - 实体（Cubes）定义指标与关系；Views 定义面向消费方的数据产品
+    - **Meta API（模型自省）**
+      - AI/工具必须通过 Meta API 获取可用指标与关系，禁止绕开语义层自建口径
+      - 自省能力是 AI 正确生成查询的必要前置条件
+      - 访问入口：`GET /cubejs-api/v1/meta`（需有效鉴权）
+      - 返回对象：`cubes[]`，每个元素含 `name/type/title/meta/measures/dimensions/segments/hierarchies/folders/connectedComponent`
+      - 仅返回 `public` 为 true 的 cube/view 与成员
+    - **API 访问标准**
+      - 必须提供并优先使用标准协议：REST / GraphQL / SQL
+      - 任何工具接入必须通过语义层 API，禁止直连数仓绕开治理
+      - REST API
+        - 常用端点：`/v1/load`（执行语义查询）、`/v1/meta`（模型自省）、`/v1/sql`（生成 SQL）
+        - 查询格式：JSON（measures/dimensions/timeDimensions/filters/limit/offset/timezone）
+        - 缓存策略：`stale-if-slow` / `stale-while-revalidate` / `must-revalidate` / `no-cache`
+        - 结果行数：默认 10,000；最大 50,000（除非启用流式结果）
+        - timeDimensions
+          - `dimension` + `dateRange`（单值或区间，支持相对时间）
+          - `granularity` 用于时间分组
+          - `compareDateRange` 用于多时间段对比；需配 `queryType: "multi"`
+        - filters
+          - `member` + `operator` + `values`
+          - 时间类 operator：`inDateRange` / `notInDateRange` / `beforeDate` / `afterDate`
+        - order/limit/offset/timezone
+          - `order` 支持 `asc/desc`，默认按时间维度与度量排序
+          - `timezone` 使用 TZ 数据库名称；默认 UTC（可配置默认时区）
+      - GraphQL API
+        - 入口：`/graphql`；语义等价于 REST 查询
+        - 限制：不支持 WebSocket、compare date ranges、segments、`/v1/meta`
+        - 限制：不支持 subscriptions 与 pivot config
+      - SQL API
+        - 入口：Postgres 协议或 HTTP `/v1/cubesql`
+        - 语义 SQL：可用 `MEASURE(...)` 引用度量
+        - 支持查询规划：常规 / post-processing / pushdown
+        - 认证：默认使用 `CUBEJS_SQL_USER` / `CUBEJS_SQL_PASSWORD`
+        - 自定义认证：`checkSqlAuth()` 返回 `password` + `securityContext`
+        - 超级用户：`CUBEJS_SQL_SUPER_USER` + `canSwitchSqlUser`
+      - DAX / MDX API
+        - DAX 面向 Power BI；MDX 面向 Excel/XMLA
+        - MDX 仅支持 Views（不支持直接查询 Cubes）
+        - 均为 Preview/高级能力（取决于产品版本与订阅等级）
+    - **缓存与性能护栏**
+      - 预聚合用于降低延迟与成本，必须通过语义层统一治理
+      - 预聚合由 Cube Store 持久化（分布式存储，如 S3），由语义层运行时自动匹配使用
+      - 缓存分两级：内存缓存（查询结果）+ 预聚合（持久化 rollups）
+      - 预聚合匹配（aggregate awareness）：按 measures/dimensions/time_dimension/granularity 匹配
+      - rollup-only 模式：仅允许命中预聚合，否则拒绝查询
+    - **多数据源与并发治理**
+      - 多数据源声明：`CUBEJS_DATASOURCES=default,ds1,ds2`
+      - 数据源配置：`CUBEJS_DS_<DATASOURCE>_DB_*`（如 `CUBEJS_DS_DS1_DB_TYPE`）
+      - 选择数据源：在 cube 中设置 `data_source`
+      - 并发配置：`CUBEJS_CONCURRENCY`、`CUBEJS_REFRESH_WORKER_CONCURRENCY`、`CUBEJS_DB_MAX_POOL`
+    - **多租户治理与隔离**
+      - `context_to_app_id`：隔离编译缓存与 schema
+      - `context_to_orchestrator_id`：隔离队列/连接/预聚合缓存
+      - `driver_factory`：按租户动态路由数据源
+      - `repository_factory`：按租户动态装载模型文件
+      - `schema_version`：租户模型变化时强制重编译
+      - `pre_aggregations_schema`：预聚合表按租户隔离
+      - `query_rewrite`：同库多租户下的强制过滤
+      - `scheduled_refresh_contexts/time_zones`：多租户刷新上下文与时区
+    - **环境与发布治理**
+      - 环境类型：Production（主分支）/ Staging（分支）/ Development（个人开发）
+      - Dev Mode：按分支实时生效；自动挂起约 10 分钟；不启用自动扩缩容与后台刷新
+      - 生产环境：必须关闭 Dev Mode（`CUBEJS_DEV_MODE=false`）并启用安全策略
+      - 部署类型：Development Instance / Production Cluster / Production Multi-Cluster
+    - **运维与可观测性**
+      - SQL Runner：可直查数据源或 Cube Store；可切换 security context
+      - Query History：追踪 API/SQL、缓存命中、错误、预聚合使用与性能
+    - **编排与外部刷新**
+      - Orchestration API：`/v1/pre-aggregations/jobs` 触发预聚合构建
+      - `scheduled_refresh: false` 时必须由外部编排触发
+      - 可与 Airflow/Dagster/Prefect 等编排工具集成
+    - **语义层同步（Semantic Layer Sync）**
+      - 将 Cube 语义模型同步到 BI 工具数据集/指标
+      - 支持 Metabase / Superset / Preset / Tableau（Tableau 受限于订阅等级）
+      - 触发方式：构建后自动 / 定时 / 手动；可设置 `active: false` 禁用
+    - **密钥与加密治理**
+      - API Keys：用于嵌入/会话等 API 访问；需妥善管理与定期轮换
+      - 加密密钥：支持 AES-256 客户自管密钥；新增密钥后新分区使用新密钥
+      - 旧密钥移除前必须重建使用旧密钥加密的分区
+    - **入门与模型创建流程**
+      - Cube Core：创建项目 → 连接数据源 → 生成模型 → 查询验证 → 添加预聚合
+      - 创建项目：Docker Compose 启动，开发模式 `CUBEJS_DEV_MODE=true`
+      - 连接数据源：Playground 首次配置会写入 `.env`
+      - 预聚合建议：通过 Rollup Designer 生成并写回模型
+    - **探索与分析（Workbooks / Explore / Playground / Analytics Chat）**
+      - Workbooks：分析与共享的主工作区，支持多 tab
+      - tab 类型
+        - Semantic Query：走语义层，统一指标与权限，并可用语义 SQL
+        - Source SQL：直写数据源 SQL，适合临时/未建模分析
+      - 查询与可视化
+        - 支持过滤、分组、透视、排序与图表
+        - 行数限制：默认约 5,000，可提升至 50,000
+      - Playground
+        - 面向开发与验证：查看生成 SQL、切换 security context、复制 API 查询
+      - Analytics Chat / Explore
+        - 自然语言生成查询与图表
+        - Chat 结果可进入 Explore 深入分析
+    - **呈现与嵌入（Dashboards / Embedding）**
+      - Dashboards：从 Workbooks 中整理与发布用于消费的分析视图
+      - Signed Embedding（对外嵌入）
+        - `Generate Session` 生成会话
+        - session 有效期 5 分钟且一次性
+        - 交换得到 access token 有效期 24 小时
+      - Private Embedding（内部嵌入）
+        - 依赖 Cube 账号登录态，无 session 交换流程
+    - **鉴权与认证（JWT / JWKS / SQL API）**
+      - JWT：`Authorization` 头传入；声明用于构建 security context
+      - JWT 配置：`CUBEJS_API_SECRET` 或 `CUBEJS_JWK_URL/CUBEJS_JWT_KEY`
+      - 可校验 `issuer/audience/subject` 等标准 claims
+      - SQL API：`checkSqlAuth()` 返回 `password` + `securityContext`
+    - **JavaScript SDK 与实时查询**
+      - `@cubejs-client/core` 为基础客户端；数值默认以字符串返回（`castNumerics` 可转换）
+      - WebSocket 传输：`@cubejs-client/ws-transport` + `CUBEJS_WEB_SOCKETS`
+      - 订阅模式：`subscribe()` 支持实时更新（需启用 WebSocket）
+      - 框架适配：React / Vue / Angular 使用各自 SDK
+    - **AI 代理规则（Spaces / Agent Rules）**
+      - 规则类型：Always Rules（总是生效）/ Agent Requested Rules（条件触发）
+      - 规则需具体、可执行、可测试
+      - 冲突处理：更具体规则优先；必要时提示人工澄清
+      - 作用域：规则在 Space 级别生效
+
+  - **你最终交付给消费方的是什么（对外接口层）**
+    - **View（门面层：最终数据产品）**
+      - **职责**
+        - 只暴露“可被消费的成员集合”（按 join_path 引入并 include/exclude）
+        - 统一治理与访问控制（access_policies）
+        - 消除 join 歧义（join_path/alias/prefix）
+      - **不做什么**
+        - 不定义自己的 members
+        - 不定义自己的 pre-aggregations（复用底层 cube 的 pre-aggregations）
+    - **Cube（底层语义构件：可组合的积木）**
+      - 定义数据集（sql_table 或 sql）
+      - 定义 members（dimensions/measures/segments/hierarchies）
+      - 定义关系（joins）与性能策略（pre-aggregations/refresh_key）
+      - 定义安全策略（access_policies）
+      - 团队实践建议：**cubes 默认 public: false，只通过 views 对外**
+      - 大规模多租户场景（例如租户数 > 100）可考虑 multi-cluster deployment
+
+  - **设计方法（先选路线，避免模型从一开始就不可用）**
+    - **entity-first（实体优先）**
+      - View 围绕实体（orders/line_items…）组织：像反范式表汇集所需维度与度量
+      - 若维度过多：为同一实体拆多个 view
+    - **metrics-first（指标优先）**
+      - View 围绕单个 measure 组织：包含分组/过滤维度，且**至多一个 time 维度**
+      - 同一指标按不同时间维度分析：建多个 view（如按下单时间/按发货时间）
+
+  - **全对象脑图（整体 → 组成 → 细节；参数级，不留死角）**
+    - **A. Model 组织与语法（先立规矩，避免全局失控）**
+      - **目录**
+        - 数据模型默认放 `model`（可用 schema_path 改名；或 repository_factory 动态指定目录与内容）
+        - 建议：cube 放 `model/cubes`；view 放 `model/views`
+        - 建议：按业务域分子目录（finance/sales…）
+      - **语法形式**
+        - YAML（.yml）与 JavaScript（.js）可混用
+        - 默认推荐 YAML（简洁可读）；需要更强动态能力时用 JS
+        - YAML 动态：Jinja + Python；JS 动态：JavaScript + asyncModule
+      - **命名（强约束）**
+        - 必须以字母开头；仅允许字母/数字/下划线
+        - 不得为 Python 保留字（from/return/yield…）
+        - 使用 DAX API 时不得与日期层级列名冲突
+        - 命名唯一性：Cube 与 View 名在全局必须唯一；成员名在 Cube 内唯一
+        - 建议：snake_case
+      - **SQL 书写约束（与数据库方言一致）**
+        - `sql`/`sql_table` 必须符合所用数据库方言；可使用 UDF
+        - 大小写敏感库需正确加引号（例如 `'public."Orders"'`）
+      - **引用语法（生产环境避免歧义的核心）**
+        - `column`：裸列名（仅简单场景；有 join 容易歧义）
+        - `{member}`：同一 cube 成员；跨 cube 需加 cube 前缀
+        - `{time_dimension.granularity}`：时间维度粒度（默认或自定义）
+        - `{CUBE}` 变量：引用当前 cube（常用于 join 或全限定引用）
+        - `{cube}.column` / `{cube.member}`：全限定引用
+        - `{cube1.cube2.member}`：join 路径引用（解决菱形 join/多级 cube 歧义；可用于 calculated members/views/pre-aggregations）
+        - `{cube.sql()}`：引用另一 cube 的 sql（用于多态、data blending 等）
+        - 转义：YAML 用 `{ref}`；JS 用 `` `${ref}` ``；字面花括号需 `\{` `\}` 转义
+        - 非 SQL 上下文：裸名视为成员名；可用 `member`/`cube.member`/`CUBE.member`
+      - **上下文变量（动态 SQL 与治理的基础）**
+        - `CUBE`：当前 cube 上下文
+        - `FILTER_PARAMS`：查询过滤参数（动态参数/动态过滤）
+          - 语法：`{FILTER_PARAMS.<cube>.<member>.filter(sql_expression)}`
+          - 多个 FILTER_PARAMS 组合时，需用 `FILTER_GROUP(...)` 保证逻辑正确（AND/OR）
+          - 过度使用会增加维护复杂度，需谨慎
+        - `SECURITY_CONTEXT`：查询时安全上下文（按请求/用户）
+          - 用于行级安全与强制过滤
+          - 文档提示部分场景将被更推荐的 `query_rewrite` 替代，使用时需关注版本约束
+        - `COMPILE_CONTEXT`：编译时上下文（可含 security_context 等）
+          - 不按查询实时更新，而是按编译缓存（如 app_id / context_to_app_id）更新
+          - 适合多租户/动态 schema，不适合每请求变化的逻辑
+        - `SQL_UTILS`：包含 `.convertTz()` 等时区转换工具函数
+      - **时区治理**
+        - 默认时区：UTC（可由 `CUBEJS_DEFAULT_TIMEZONE` 覆盖）
+        - 查询时区：API 请求可携带 `timezone` 字段（优先级最高）
+
+    - **B. Cube（数据集 + 语义成员 + 关系/性能/安全）**
+      - **B1. 基本信息（是什么）**
+        - `name`：唯一标识（受命名规范约束）
+        - `title`：展示名（默认对 name humanize）
+        - `description`：说明（会在 Playground/API 暴露）
+        - `public`：是否允许通过 API 查询（默认 true；团队实践建议底层 cubes 设为 false）
+        - `meta`：自定义元数据
+      - **B2. 数据集层（从哪来）**
+        - `sql_table`：单表优先（直接写表名）
+        - `sql`：自定义 SQL 生成被查询的“表/子查询”
+          - 约束：不要在 cube 级 `sql` 写 `GROUP BY`
+        - `data_source`：多数据源时指定（默认为 `default`；对应 `driverFactory()` 逻辑）
+        - `sql_alias`：别名过长被数据库截断时设置短别名（会影响成员名与 pre-aggregation 表名）
+      - **B3. 缓存与刷新（怎么保证数据新鲜）**
+        - `refresh_key`
+          - 默认行为：BigQuery/Athena/Snowflake 等默认 `every: '2 minute'`；其它默认 `every: '10 second'`
+          - 可用 `every`（second/minute/hour/day/week 或 CRON）
+            - 约束：CRON 不支持“每月某日”“每月”间隔
+          - 可用 `sql`（例如 `SELECT MAX(updated_at) ...`）
+          - 可配 `timezone`
+      - **B4. 复用与抽象（怎么做到可维护）**
+        - `extends`：继承父 cube 的成员（成员会合并）
+          - 约束：继承的是 members/joins 等定义，不继承基表；子 cube 仍需自己的 `sql_table/sql`
+          - 建议：引用列/成员用 `CUBE` 变量，不要写死父 cube 名
+          - FILTER_PARAMS 配合（父 cube 使用 FILTER_PARAMS 时）
+            - 方案 A：子 cube 覆盖 `sql`，使用 `FILTER_PARAMS.child_cube...`
+            - 方案 B：父 cube 汇总所有子 cube 过滤（未用到会渲染为 `1 = 1`）
+        - JS 复用：可把 cube definition 抽为变量后再引用（便于动态生成与复用）
+      - **B5. 成员层（有什么业务口径）**
+        - **dimensions（维度：分组/过滤/下钻）**
+          - 核心字段：`name` / `sql` / `type` / `title` / `description` / `meta`
+          - 可选字段：`public`（默认 true；若 `primary_key: true` 则默认为 false）/ `order`（默认排序 asc/desc）
+          - `primary_key: true`：主键维度（用于 join 消歧与去重；支持组合主键）
+          - 维度类型：`string` / `number` / `boolean` / `time` / `switch` / `geo`
+          - `geo`：包含经纬度字段（用于地图可视化）
+          - `switch`：枚举/类型转换（Tesseract 预览功能）
+          - `type: time`
+            - 默认粒度：year / quarter / month / week（默认周一）/ day / hour / minute / second
+            - 自定义 `granularities[]`：通过 `interval + offset` 定义（如 Sunday 周起点、财年起点）
+          - subquery dimensions（子查询维度）：`sub_query: true`（引入其它 cube 的度量）
+          - `drill_members`：定义下钻路径
+        - **measures（度量：聚合/计算）**
+          - 核心字段：`name` / `type` / `sql` / `description` / `meta` / `drill_members`
+          - 聚合类型：count / sum / avg / min / max / count_distinct / count_distinct_approx / number_agg
+          - 非数值类型：string / boolean / time（需在 `sql` 中含聚合函数）
+          - `filters[]`：条件聚合（`CASE WHEN` 逻辑）
+          - `format`：currency / percent / id / imageUrl / link
+          - calculated measures：度量组合（跨 cube 要求存在 join 关系）
+          - multi-stage calculations（Tesseract 预览）：
+            - `rolling_window` / `time_shift` / `period-to-date` / `ranking` / `case`
+            - `case` 需配 `switch/when/else` 逻辑
+        - **hierarchies（层级：钻取）**
+          - `levels`：有序维度列表（coarse → fine）
+        - **segments（片段：预定义过滤）**
+          - `sql`：布尔表达式
+      - **B6. 关系与数据图（怎么关联，关联后有什么坑）**
+        - `joins`
+          - 字段：`name`（目标 cube）/ `sql`（ON 条件）/ `relationship`（one_to_one/one_to_many/many_to_one）/ 可选 `alias`
+          - 别名支持：`belongs_to` / `has_many` / `has_one` 均可用作 relationship 别名
+          - join 实现：Cube 内部采用 LEFT JOIN（join 定义所在 cube 在左侧）
+          - 若需要接近 INNER JOIN 行为，可对被 join 列加 `IS NOT NULL` 过滤
+          - Transitive Joins：支持跨级关联（如 A→B→C），Cube 使用 Dijkstra 算法自动寻径
+          - 主键要求：one_to_many 关联时，Base Cube 必须定义 `primary_key` 避免 fan-out 重复计数
+          - join tree 与消歧：
+            - 若存在多条 join 路径（如菱形 join），需通过 views 的 `join_path` 或全限定引用显式指定路径
+          - many-to-many（多对多）：需通过 junction cube 进行两段 join（one_to_many + many_to_one）
+      - **B7. 性能（怎么快）**
+        - `pre_aggregations`
+          - 目标：预计算并存储聚合结果加速查询
+          - 常见类型：rollup / original_sql / rollup_join / rollup_lambda / rollup_only
+          - rollup：核心类型，按 measures/dimensions/time_dimension 聚合
+          - original_sql：持久化复杂 SQL 结果供后续引用
+          - rollup_join (Preview)：
+            - 支持跨数据源 join rollups
+            - 约束：仅支持 2 个 rollup；且至多只有 1 个 rollup 可存在多分区
+            - 约束：是 ephemeral 的，不支持 `scheduled_refresh: true`
+            - 约束：join 键必须定义索引，否则规划失败
+          - rollup_lambda：
+            - Lambda 架构：合并 batch (pre-agg) 与 real-time (source) 数据
+            - 约束：必须在 `pre_aggregations` 列表中定义在被引用的 rollup **之前**
+            - 约束：仅支持 Cube Store 存储引擎
+          - 分区与刷新：
+            - `partition_granularity`：时间分区粒度（建议分区总数控制在 500-1000 以内）
+            - `build_range_start/end`：定义分区构建的时间范围
+            - `refresh_key`：默认每 1 小时刷新一次
+            - `scheduled_refresh`：生产环境建议设为 true（由 background worker 刷新）
+          - 存储引擎与生产运行：
+            - Cube Store：专属预聚合存储引擎，Parquet 列式存储
+            - 生产持久化：强制要求强一致性对象存储（S3 / GCS / Azure Blob）
+            - 节点架构：Router (控制平面) + Worker (计算/构建平面)
+            - Scratch 存储：节点本地 SSD 用于加速分区加载与查询
+            - Garbage Collection：Orphaned tables 默认 TTL 为 1 天
+          - 匹配规则（Aggregate Awareness）：
+            - 要求 measures 必须是可加的（Additive）
+            - 要求 query 中的 dimensions/filters 必须是 pre-agg 成员的子集
+            - 粒度匹配：Query 粒度必须是 Pre-agg 粒度的倍数或一致
+            - `rollup_only`：强制仅使用预聚合，匹配失败则拒绝查询
+      - **B8. 安全（谁能看什么）**
+        - `access_policies`
+          - **Default Deny**：一旦定义策略，未匹配的用户将默认被拒绝访问
+          - 行级/列级访问控制
+          - 常见：按 group/groups 定义规则
+          - `group: "*"` 表示对所有用户生效
+          - member_level：includes / excludes（不可同时使用）
+          - includes/excludes 可用 `"*"` 快速指定全部
+          - row_level：filters（member/operator/values）
+          - values 可从 `userAttributes` (Cloud) 或 `securityContext` (Core) 获取
+          - 声明优先级：View 的安全限制优于 Cube
+          - 叠加规则：多个匹配的 policies 之间按 **OR** 逻辑合并
+          - 级联规则：View 与 Cube 的行级过滤器按 **AND** 逻辑叠加
+          - public 与 member_level：即便策略允许，`public: false` 的成员依然不可见
+          - 可用 `conditions` 增加前置判定逻辑（基于安全上下文的布尔声明）
+      - **B9. 特殊模式（解决特殊业务结构）**
+        - polymorphic cubes（多态）
+          - 单表多实体（type 列）：建基 cube + 子 cube（extends + 覆盖 sql 过滤 type）
+          - 在关联 cube 上分别 join 到不同子 cube，保证语义清晰
+        - calendar cubes（日历 cube）
+          - `calendar: true`；Tesseract（Preview）
+          - 需要 time 类型 primary_key + 业务 time 维度
+          - join 要求：calendar join 维度为 time + primary_key；业务方 join 维度为 time
+          - 覆盖 time_shift
+            - 用日历表预计算列（month_ago/year_ago…）映射 prior interval（每种 type+interval 可配置 sql 或 name）
+            - 当业务 cube 的 time_shift 度量与 calendar 的 time 维度一同使用时，会采用 calendar 中的覆盖定义
+          - 覆盖 granularities
+            - 用自定义 sql 替代默认 DATE_TRUNC（如 4-5-4 周/月/季）
+        - data blending（数据混合）
+          - 适用：无法 join（除时间外）但要同图对比/计算；或两表结构高度相似
+          - 做法：新 cube 的 `sql` = 子 cube `UNION ALL`（用 `${cube.sql()}`）；统一列名 + row_type 区分来源
+          - 度量：基于 row_type 用 filters 拆 online/offline，再计算占比等
+          - 性能：数据量大时，优先“各子查询先聚合、再合并”，通常比“先按日期 join 再聚合”更高效
+          - 额外路径：客户端多查询合并（同 dateRange/granularity 后按时间对齐）
+
+    - **C. View（门面层：对外可消费的数据产品）**
+      - **基本信息**
+        - `name`（唯一，且不与 cube 名冲突）
+        - `title`/`description`/`meta`
+        - `public`（默认 true；可根据 `COMPILE_CONTEXT` 动态设置）
+        - `extends`：继承其它 view 的成员定义
+      - **核心：cubes[]**
+        - `join_path`：点分路径（如 `orders.customers`），明确引用链路并消除 join 歧义
+        - `includes`
+          - `"*"` 表示全量引入
+          - 列表形式：`[dim1, measure1]`
+          - 对象形式：支持覆盖 `alias/title/description/format/meta` 等属性
+        - `excludes`：在 `includes: "*"` 时显式排除特定成员
+        - `prefix`：布尔值或别名，控制成员名的前缀
+        - `alias`：对引入的成员进行重命名
+      - **组织：folders**
+        - `{ name, includes }`：对成员进行逻辑分组（UI 展示向）
+        - 支持嵌套 folder；展示效果取决于具体的可视化工具集成
+      - **治理：access_policies**
+        - 建议在门面层统一收口访问控制逻辑，实现“数据即产品”的治理
+
+    - **D. 动态数据模型（当静态 YAML 不够用时）**
+      - **D1. YAML + Jinja + Python**
+        - YAML 建议：多行字符串用 `|`（literal）
+        - Jinja
+          - 循环：动态生成重复结构（如 UNION 或批量度量）
+          - macros：封装可复用的维度模板或 SQL 片段
+          - 转义：Jinja auto-escaping 可能破坏 YAML，建议用 `| safe`
+        - Python (Template context)
+          - `model/globals.py`：注册全局函数或变量供 Jinja 调用
+          - 依赖治理：项目根目录需提供 `requirements.txt`
+      - **D2. JavaScript (含 asyncModule)**
+        - 执行环境：Node.js VM (Node 8+)；不支持 process/console 等全局变量
+        - require()：支持加载模型文件、Node 模块及 Cube 官方包
+        - asyncModule()
+          - 核心约束：在 asyncModule 中生成的 dimensions/measures，其 `sql` 属性必须是 `() => string` (无参函数)
+          - 核心约束：`drill_members` 必须是 `() => string[]`
+          - `schema_version`：可异步通过 API 获取版本，触发模型重编译
+        - JS 复用：建议将复杂逻辑抽离至 model 目录外的辅助模块，再通过 `import` 引入
+
+    - **E. 风格指南（保证团队协作一致性）**
+      - 默认 YAML、snake_case
+      - 目录：cubes `model/cubes`；views `model/views`；按业务域分目录
+      - cubes：建议 `public: false`；名称用复数实体；可用 `base_` 避免与 view 重名；优先 `sql_table`；关系用 many_to_one/one_to_many/one_to_one
+      - 参数顺序（建议）
+        - Cube：name, sql_alias, extends, data_source, sql/sql_table, title, description, public, refresh_key, meta, pre_aggregations, joins, dimensions, hierarchies, segments, measures, access_policy
+        - Dimension/Measure：name, title, description, sql, type, primary_key, sub_query, public, format, filters, drill_members
+        - View：name, description, public, cubes, folders, access_policy
+      - SQL 风格：2 空格缩进、尾逗号、关键字大写、`!=`、`AS`、优先 CTE、JOIN 列加前缀、单引号、可读性优先
+      - YAML 风格：`.yml`、2 空格、列表缩进、行宽约 80、多行用 `|`、需要引号用双引号
+
+    - **F. 配方库（直接落地的模式）**
+      - **基础建模示例（users）**
+        - 示例表字段：`id` / `paying` / `city` / `company_name`
+        - 目标问题：总用户数 / 付费用户数 / 付费占比 / 按城市或公司分组
+        - YAML 示例（精简）：
+          - `cubes: - name: users; sql_table: users`
+          - `measures: count (sql: id, type: count)`
+          - `measures: paying_count (sql: id, type: count, filters: {CUBE}.paying = 'true')`
+          - `measures: paying_percentage (sql: "100.0 * {paying_count} / NULLIF({count}, 0)", type: number, format: percent)`
+          - `dimensions: city (type: string), company_name (type: string)`
+        - 生成 SQL（概念化）：
+          - `COUNT(id)` 对应 count
+          - `COUNT(CASE WHEN paying = 'true' THEN id END)` 对应 paying_count
+          - `100.0 * paying_count / NULLIF(count, 0)` 对应 paying_percentage
+          - 加维度查询时会自动生成 `GROUP BY`
+      - **活跃用户 DAU/WAU/MAU**
+        - rolling_window + count_distinct(user_id)
+        - MAU trailing 30 day；WAU trailing 7 day；DAU trailing 1 day；offset start
+        - 组合指标（WAU/MAU）：`100.0 * weekly / NULLIF(monthly, 0)` + percent
+        - 查询建议：给 timeDimensions.dateRange + 合适 granularity
+      - **平均值与百分位（含中位数/P95）**
+        - 背景：偏态分布下平均数易误导，百分位更稳健；中位数是 50% 百分位
+        - avg：type avg + sql 列
+        - percentile：type number + 数据库函数（PERCENTILE_CONT / APPROX_QUANTILES…）
+      - **自定义时间粒度（周起点/财年/财季）**
+        - time dimension granularities：interval + offset（例 sunday_week：1 week + -1 day）
+        - 建议：用 proxy dimensions 对外暴露自定义粒度
+      - **自定义日历（4-5-4）**
+        - calendar cube（public false）包含周起止与序号等属性
+        - 为每个事实表时间维度建辅助日历 cube（extends）
+        - 事实 cube 上分别 join（常用 BETWEEN week_start_date AND week_end_date）
+        - 建议：生产用 dbt 物化日历表
+      - **数据快照（SCD2：截至某日最新状态）**
+        - 生成日期序列 → join 变更表 → 取截至当日 MAX(changed_at)
+        - 新增 date(time) 作为快照日；按 date equals + status 过滤后 count
+      - **动态生成指标（按 status 自动生成 count 与占比）**
+        - statuses 列表驱动：生成 total_{status}_orders + percentage_of_{status}
+      - **动态参数（只让“某些度量”受用户选择影响）**
+        - cube sql 中用 FILTER_PARAMS 得到用户选择集合 → 与全量数据 CROSS JOIN 生成 *_filter 列
+        - 在 measure filters 里用 *_filter 控制仅某些度量被过滤
+        - 安全性：只允许从数据集已有值选择，避免注入任意输入
+      - **动态 UNION 表（多张同构表合并）**
+        - sql UNION ALL + 来源标识列；推荐用 Jinja/JS 生成 UNION SQL
+      - **EAV 模型（实体-属性-值）**
+        - 静态属性：多次 join + SELECT 计算（属性变化需要改 SQL+dimensions）
+        - DRY：用 JS 列表生成 JOIN/SELECT/维度定义
+      - **事件分析（构建 sessions）**
+        - tracks/pages UNION ALL 成 events；pageview event='pageview'；生成 event_id 主键
+        - LAG 计算 inactivity_time；30 分钟切 session
+        - sessions cube：session_id/session_start_at/sequence/next_session_start_at…
+      - **漏斗分析（Funnels）**
+        - 约束：需使用 JavaScript 语法定义（依赖 Funnels package）
+        - 配置项：`userId` / `time` / `steps[]` (包含 event 过滤) / `timeToConvert` (转换时限)
+      - **留存分析（Retention / Cohort）**
+        - 实现逻辑：构造 `user x month` 的全组合笛卡尔积，再左连接活动数据
+        - 度量建议：`total_count` / `total_active_count` / `percentage_of_active`
+      - **过滤聚合（Filtered aggregates）**
+        - 下游 cube 定义全量与带 filters 的度量（filters 可引用上游维度）
+        - 上游 cube 用 sub_query 维度引入下游度量，再做计算度量比值
+      - **嵌套聚合（Nested aggregates）**
+        - 内层聚合在 fact cube；外层聚合在另一 cube
+        - 用 sub_query 维度引入内层 measure，再做 PERCENTILE_CONT 等
+      - **环比/同比（Period-over-period）**
+        - time_shift prior 1 month/year + multi_stage 计算比值
+        - 依赖 Tesseract；granularity 需与周期一致
+      - **XIRR（内部收益率）**
+        - SQL/DAX/MDX 可用；且在 Cube Store 实现
+        - 约束：未命中 pre-aggregations 可能报 “function xirr(...) does not exist”
+        - 建议：multi_stage + 按 day 聚合 + 配预聚合（提高命中）
+        - 命中预聚合时：SQL/REST 查询路径也可用
+      - **留存 Cohort**
+        - 构造 user × month 全组合（包含无活动月份）
+        - 度量：total_count / total_active_count(monthly_pageviews>0) / percentage_of_active
+        - 维度：signup_date(cohort 月) / months_since_signup
+        - 典型结构：先构造 months_list，再 users×months 左连接，并再左连接按月聚合的活动数据
+        - 时区注意：date_trunc 可能为 UTC，必要时显式时区转换
+      - **字符串时间维度**
+        - 约束：time 维度必须产出 TIMESTAMP
+        - string → timestamp：用数据库解析函数（如 PARSE_TIMESTAMP；并关注默认时区/显式时区）
+        - 性能：RDBMS 上解析可能慢，建议上游转换或新增 timestamp 列并建索引
+      - **Cube + dbt 集成**
+        - dbt 负责数仓转换；Cube 在其上定义语义层并对外提供 API
+        - 约束：不支持 ephemeral 类型的 dbt 模型
+        - 最佳实践：dbt 中统一时间为 TIMESTAMP；模型提供 `updated_at`
+        - 类型映射：若 dbt 元数据缺失类型，默认映射为 `string`
+        - refresh_key.sql：用 `MAX(updated_at)`；snapshots 可用 `dbt_valid_from/dbt_valid_to` 组合构造
+        - 预聚合刷新：可在 dbt 更新后触发刷新（Orchestration API）
+        - cube_dbt：读取 manifest → 筛选模型 → 生成基础 cubes/dimensions → 再补 measures/joins/pre-aggregations → 用 views 对外暴露
+      - **Looker 迁移 (lkml2cube)**
+        - 约束：只有运行 `views` 命令时才会生成 join 关系定义
+        - 建议：迁移后需手动校验度量逻辑，LookML 特有的复杂表达式可能无法 100% 自动对齐
+
+    - **G. 常见故障与边界条件（集中列出，便于排查）**
+      - `Can't parse timestamp`
+        - 原因：time 维度 SQL 结果不是 TIMESTAMP 类型
+        - 处理：使用数据库函数显式解析字符串（如 `PARSE_TIMESTAMP`）
+      - rolling window 无 dateRange 报错
+        - 条件：未启用 Tesseract 引擎且未在查询中提供时间区间
+        - 处理：必须在 timeDimensions 中提供 `dateRange`
+      - XIRR 函数不存在
+        - 条件：查询未命中预聚合
+        - 处理：确保通过多阶段计算定义，并配置预聚合进行物理命中
+      - `Continue wait` 错误
+        - 原因：查询正在计算或排队，REST API 超时重试信号
+        - 处理：客户端应保持连接并自动重试，而非直接报错中断
+      - SQL API 分页偏移量限制
+        - 约束：大偏移量（offset）可能导致性能显著下降，建议优先使用流式模式
+
+    - **H. 高级架构与基础设施约束（BYOC / VPC / 扩展性）**
+      - **部署模型**
+        - Shared Infrastructure：全托管，快速上手，但缺乏 VPC 隔离
+        - BYOC (Bring Your Own Cloud)：仅限 Enterprise Premier；组件运行在用户云账号（AWS/GCP/Azure）
+      - **BYOC 核心约束**
+        - 网络隔离：必须在用户 VPC 内运行，支持 PrivateLink 端点
+        - 权限治理：需提供 IAM Role（如 CubeCloudBYOC），授予集群、网络、存储管理权
+        - DNS 消歧：私有端点需正确配置私有托管区（Private Hosted Zone）
+        - 扩缩容：Cube Store Worker 建议至少 2 个；单个 Worker 承载预聚合上限约为 150GB
+      - **资源配额（Cloud Tiers）**
+        - 部署数量：Free (2) / 其他 (Unlimited)
+        - 查询限流：REST/GraphQL API 默认配额约为 100 RPS
+        - 数据留存：查询历史与审计日志留存天数取决于 Tier
+
+    - **I. 认证、授权与审计（合规性约束）**
+      - **认证方案 (Auth Methods)**
+        - JWT (JSON Web Token)：REST API 标准方案；通过 JWKS 自动轮换密钥
+        - LDAP：支持 SQL API 认证与 Cube Cloud 用户/角色映射（需 Enterprise）
+        - Kerberos：仅支持 Windows 域环境下的 DAX/MDX API 访问
+      - **安全上下文 (Security Context)**
+        - 核心职责：承载用户属性（userAttributes），驱动行级安全与模型自省
+        - 隔离性：通过 app_id 与 orchestrator_id 隔离不同上下文的缓存与连接
+      - **审计日志 (Audit Log)**
+        - 记录范围：用户变更、模型部署、版本控制、登录事件、API 密钥轮换
+        - 等级要求：主要面向 Enterprise Premier 提供，支持 CSV 导出
+
+    - **J. 数据源特定约束（数据库方言适配）**
+      - **高性能仓库 (BigQuery/Snowflake/Athena)**
+        - 默认并发：BigQuery (10) / Snowflake (8) / Athena (10)
+        - 导出机制：支持通过 S3/GCS 桶进行大规模 CSV 导出并快速加载至 Cube Store
+      - **事务库 (Postgres/MySQL)**
+        - 建议：务必配置 `CUBEJS_DB_MAX_POOL` 确保连接数大于并发查询数
+      - **NoSQL (MongoDB)**
+        - 约束：需通过 Cube 专用驱动进行 SQL 语义转换；建议对过滤字段建立底层索引
+
+    - **K. 语义层同步与 D3 智能治理**
+      - **Semantic Layer Sync**
+        - 同步机制：构建后自动触发；支持定时（scheduleInterval）
+        - 隔离性：开发分支同步至独立数据库，避免污染生产 BI 数据集
+      - **Cube D3 (Agentic Analytics)**
+        - 核心对象：Spaces (隔离环境) / Agents (特定任务) / Models (LLM)
+        - 记忆模式：User Mode (私有) / Space Mode (共享) / Disabled
+
+    - **H. 高级架构与基础设施约束（BYOC / VPC / 扩展性）**
+      - **部署模型**
+        - Shared Infrastructure：全托管，快速上手，但缺乏 VPC 隔离
+        - BYOC (Bring Your Own Cloud)：仅限 Enterprise Premier；组件运行在用户云账号（AWS/GCP/Azure）
+      - **BYOC 核心约束**
+        - 网络隔离：必须在用户 VPC 内运行，支持 PrivateLink 端点
+        - 权限治理：需提供 IAM Role（如 CubeCloudBYOC），授予集群、网络、存储管理权
+        - DNS 消歧：私有端点需正确配置私有托管区（Private Hosted Zone）
+        - 扩缩容：Cube Store Worker 建议至少 2 个；单个 Worker 承载预聚合上限约为 150GB
+      - **资源配额（Cloud Tiers）**
+        - 部署数量：Free (2) / 其他 (Unlimited)
+        - 查询限流：REST/GraphQL API 默认配额约为 100 RPS
+        - 数据留存：查询历史与审计日志留存天数取决于 Tier
+
+    - **I. 认证、授权与审计（合规性约束）**
+      - **认证方案 (Auth Methods)**
+        - JWT (JSON Web Token)：REST API 标准方案；通过 JWKS 自动轮换密钥
+        - LDAP：支持 SQL API 认证与 Cube Cloud 用户/角色映射（需 Enterprise）
+        - Kerberos：仅支持 Windows 域环境下的 DAX/MDX API 访问
+      - **安全上下文 (Security Context)**
+        - 核心职责：承载用户属性（userAttributes），驱动行级安全与模型自省
+        - 隔离性：通过 app_id 与 orchestrator_id 隔离不同上下文的缓存与连接
+      - **审计日志 (Audit Log)**
+        - 记录范围：用户变更、模型部署、版本控制、登录事件、API 密钥轮换
+        - 等级要求：主要面向 Enterprise Premier 提供，支持 CSV 导出
+
+    - **J. 数据源特定约束（数据库方言适配）**
+      - **高性能仓库 (BigQuery/Snowflake/Athena)**
+        - 默认并发：BigQuery (10) / Snowflake (8) / Athena (10)
+        - 导出机制：支持通过 S3/GCS 桶进行大规模 CSV 导出并快速加载至 Cube Store
+      - **事务库 (Postgres/MySQL)**
+        - 建议：务必配置 `CUBEJS_DB_MAX_POOL` 确保连接数大于并发查询数
+      - **NoSQL (MongoDB)**
+        - 约束：需通过 Cube 专用驱动进行 SQL 语义转换；建议对过滤字段建立底层索引
+
+    - **K. 语义层同步与 D3 智能治理**
+      - **Semantic Layer Sync**
+        - 同步机制：构建后自动触发；支持定时（scheduleInterval）
+        - 隔离性：开发分支同步至独立数据库，避免污染生产 BI 数据集
+      - **Cube D3 (Agentic Analytics)**
+        - 核心对象：Spaces (隔离环境) / Agents (特定任务) / Models (LLM)
+        - 记忆模式：User Mode (私有) / Space Mode (共享) / Disabled
